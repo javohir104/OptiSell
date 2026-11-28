@@ -1,19 +1,12 @@
-import { checkDatabase } from '../config/db.js';
+import { db, storageKind } from '../db/store.js';
 
-export async function getHealth(req, res) {
-  let database = 'up';
-  try {
-    await checkDatabase();
-  } catch {
-    database = 'down';
-  }
-
-  const healthy = database === 'up';
-  res.status(healthy ? 200 : 503).json({
-    success: healthy,
+export function getHealth(req, res) {
+  res.json({
+    success: true,
     data: {
-      status: healthy ? 'ok' : 'degraded',
-      database,
+      status: 'ok',
+      storage: storageKind(),
+      users: db.users.length,
       uptime_seconds: Math.round(process.uptime()),
       timestamp: new Date().toISOString(),
     },

@@ -123,22 +123,6 @@ describe('dashboard analytics', () => {
     assert.deepEqual(byProfit.body.data.items.map((i) => [i.name, i.gross_profit]), [['P1', '40.00']]);
   });
 
-  it('AI feed: daily per-product sales', async () => {
-    const res = await api('GET', `/api/analytics/daily-sales?${range}`, { token });
-    assert.equal(res.status, 200);
-    assert.deepEqual(
-      res.body.data.map((r) => [r.date, r.name, r.quantity, r.revenue]),
-      [
-        ['2026-01-10', 'P1', 2, '50.00'],
-        ['2026-01-12', 'P1', 1, '20.00'],
-        ['2026-01-12', 'P2', 5, '50.00'],
-      ],
-    );
-    assert.equal(res.body.meta.total, 3);
-    const one = await api('GET', `/api/analytics/daily-sales?${range}&product_id=${p2.id}`, { token });
-    assert.equal(one.body.meta.total, 1);
-  });
-
   it('validates ranges and intervals', async () => {
     const tooLong = await api('GET', '/api/dashboard/sales?from=2020-01-01&to=2026-01-01&interval=day', { token });
     assert.equal(tooLong.status, 400);

@@ -2,28 +2,8 @@ import { ZodError } from 'zod';
 import { AppError } from '../utils/AppError.js';
 import { env } from '../config/env.js';
 
-// Specific constraints -> friendly, stable error codes.
-const CONSTRAINT_ERRORS = {
-  products_user_sku_active_uq: () =>
-    AppError.conflict('A product with this SKU already exists', undefined, 'DUPLICATE_SKU'),
-  users_email_uq: () =>
-    AppError.conflict('An account with this email already exists', undefined, 'EMAIL_TAKEN'),
-  inventory_quantity_non_negative_chk: () =>
-    AppError.conflict('Not enough stock', undefined, 'INSUFFICIENT_STOCK'),
-};
-
-// Generic PostgreSQL error codes -> API errors.
-// https://www.postgresql.org/docs/current/errcodes-appendix.html
-const PG_ERRORS = {
-  23505: () => AppError.conflict('A record with these values already exists', undefined, 'DUPLICATE'),
-  23503: () => AppError.badRequest('Referenced record does not exist'),
-  23514: () => AppError.badRequest('Value violates a business constraint'),
-  22003: () => new AppError(400, 'VALUE_OUT_OF_RANGE', 'A numeric value or total is out of range'),
-  '22P02': () => AppError.badRequest('Invalid input syntax'),
-  57014: () => new AppError(503, 'QUERY_TIMEOUT', 'The request took too long, please try again'),
-};
-
-function normalize(err) {
+/** Known error -> AppError, or null for unexpected errors. */
+export function normalize(err) {
   if (err instanceof AppError) return err;
 
   if (err instanceof ZodError) {
@@ -40,9 +20,6 @@ function normalize(err) {
   if (err.type === 'encoding.unsupported' || err.type === 'charset.unsupported') {
     return new AppError(415, 'UNSUPPORTED_ENCODING', 'Unsupported request encoding');
   }
-
-  if (err.constraint && CONSTRAINT_ERRORS[err.constraint]) return CONSTRAINT_ERRORS[err.constraint]();
-  if (err.code && PG_ERRORS[err.code]) return PG_ERRORS[err.code]();
 
   return null;
 }

@@ -31,10 +31,8 @@ describe('register', () => {
     assert.equal(res.body.data.user.password_hash, undefined);
     assert.ok(!JSON.stringify(res.body).includes(PASSWORD));
 
-    const { rows } = await db().query('SELECT password_hash FROM users WHERE email = $1', [
-      email.toLowerCase(),
-    ]);
-    assert.match(rows[0].password_hash, /^\$2[aby]\$/, 'password must be bcrypt-hashed');
+    const stored = db().users.find((u) => u.email === email.toLowerCase());
+    assert.match(stored.password_hash, /^\$2[aby]\$/, 'password must be bcrypt-hashed');
   });
 
   it('rejects duplicate email case-insensitively (409)', async () => {
@@ -183,7 +181,7 @@ describe('protected routes / JWT', () => {
 
   it('rejects valid tokens of deleted users', async () => {
     const { token, user } = await registerUser();
-    await db().query('DELETE FROM users WHERE id = $1', [user.id]);
+    db().users.splice(db().users.findIndex((u) => u.id === user.id), 1);
     const res = await api('GET', '/api/auth/me', { token });
     assert.equal(res.status, 401);
   });
@@ -191,5 +189,36 @@ describe('protected routes / JWT', () => {
   it('rejects a validly signed token whose subject is not a UUID', async () => {
     const res = await api('GET', '/api/auth/me', { token: sign({}, { subject: "1' OR '1'='1" }) });
     assert.equal(res.status, 401);
+  });
+});
+
+describe('forgot password', () => {
+  it('Telegram code resets the password; wrong codes are limited; unknown emails look the same', async () => {
+    const { db: data } = await import('./helpers.js');
+    const { outbox } = await import('../src/services/telegram.service.js');
+    const { email, user } = await registerUser();
+    data().users.find((u) => u.id === user.id).telegram_chat_id = 777;
+
+    const unknown = await api('POST', '/api/auth/password/forgot', { body: { email: 'nobody@test.com' } });
+    const known = await api('POST', '/api/auth/password/forgot', { body: { email } });
+    assert.deepEqual(unknown.body, known.body);
+    const code = /<b>(\d{6})<\/b>/.exec(outbox.filter((m) => m.chat_id === 777).at(-1).text)[1];
+
+    const wrong = await api('POST', '/api/auth/password/reset', { body: { email, code: code === '000000' ? '111111' : '000000', new_password: 'NewPassw0rd' } });
+    assert.equal(wrong.body.error.code, 'INVALID_RESET_CODE');
+    const ok = await api('POST', '/api/auth/password/reset', { body: { email, code, new_password: 'NewPassw0rd' } });
+    assert.equal(ok.status, 200);
+    assert.equal((await api('POST', '/api/auth/login', { body: { email, password: 'NewPassw0rd' } })).status, 200);
+    // single use
+    assert.equal((await api('POST', '/api/auth/password/reset', { body: { email, code, new_password: 'Other1234x' } })).status, 400);
+  });
+
+  it('admin reset link works once', async () => {
+    const { createResetLink } = await import('../src/services/passwordReset.service.js');
+    const { email, user } = await registerUser();
+    const token = createResetLink(user.id).path.split('token=')[1];
+    const ok = await api('POST', '/api/auth/password/reset-link', { body: { token, new_password: 'Fresh1234pw' } });
+    assert.equal(ok.body.data.email, email);
+    assert.equal((await api('POST', '/api/auth/password/reset-link', { body: { token, new_password: 'Fresh1234pw' } })).status, 400);
   });
 });

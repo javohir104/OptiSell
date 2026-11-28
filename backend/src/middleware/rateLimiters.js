@@ -28,3 +28,9 @@ export const loginLimiter = rateLimit({
 
 /** Registration: limits mass account creation from one IP. */
 export const registerLimiter = rateLimit({ ...common, limit: env.AUTH_RATE_LIMIT_MAX });
+
+/** Public page-view / heartbeat tracking (per IP). */
+export const trackLimiter = rateLimit({ ...common, windowMs: 60 * 1000, limit: 120 });
+
+/** Telegram → browser Google sign-in links (each holds a little memory for 10 minutes). */
+export const handoffLimiter = rateLimit({ ...common, limit: 30 });

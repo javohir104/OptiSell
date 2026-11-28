@@ -1,6 +1,6 @@
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { api, createProduct, createSale, db, registerUser, startServer, stockOf, stopServer } from './helpers.js';
+import { api, createProduct, createSale, registerUser, startServer, stockOf, stopServer } from './helpers.js';
 
 before(startServer);
 after(stopServer);
@@ -71,30 +71,11 @@ describe('tenant isolation: user B can never touch user A data', () => {
     assert.equal(overview.body.data.profit.revenue, '0.00');
     assert.equal(overview.body.data.profit.expenses, '0.00');
     assert.equal(overview.body.data.inventory.active_products, 0);
-    const feed = await api('GET', '/api/analytics/daily-sales', { token: b.token });
-    assert.equal(feed.body.meta.total, 0);
   });
 
-  it('database itself rejects cross-tenant references (composite foreign keys)', async () => {
-    const { rows } = await db().query(
-      `INSERT INTO sales (user_id, items_count) VALUES ($1, 1) RETURNING id`,
-      [b.user.id],
-    );
-    await assert.rejects(
-      db().query(
-        `INSERT INTO sale_items (sale_id, user_id, product_id, quantity, unit_price, unit_cost)
-         VALUES ($1, $2, $3, 1, 1, 1)`,
-        [rows[0].id, b.user.id, product.id],
-      ),
-      (err) => err.code === '23503',
-    );
-    await db().query('DELETE FROM sales WHERE id = $1', [rows[0].id]);
-  });
-
-  it('database rejects negative stock even if application logic were bypassed', async () => {
-    await assert.rejects(
-      db().query('UPDATE inventory SET quantity = -1 WHERE product_id = $1', [product.id]),
-      (err) => err.code === '23514',
-    );
+  it('B cannot sell A product', async () => {
+    const res = await api('POST', '/api/sales', { token: b.token, body: { items: [{ product_id: product.id, quantity: 1 }] } });
+    assert.equal(res.status, 400);
+    assert.equal(res.body.error.code, 'INVALID_PRODUCTS');
   });
 });

@@ -1,110 +1,81 @@
-import { query } from '../config/db.js';
+import { db, insert, now, remove, update } from '../db/store.js';
 import { AppError } from '../utils/AppError.js';
-import { today } from '../utils/dates.js';
-import { SqlParams, offset, paginationMeta } from '../utils/sql.js';
-import { likePattern } from '../validators/common.js';
+import { dayInRange, today } from '../utils/dates.js';
+import { groupBy, matches, paginate, sameText, sortRows } from '../utils/list.js';
+import { cents, sumMoney } from '../utils/money.js';
 
-const COLUMNS = `id, category, amount, description, expense_date::text AS expense_date,
-                 payment_method, created_at, updated_at`;
-const UPDATABLE = ['category', 'amount', 'description', 'expense_date', 'payment_method'];
-const SORT_COLUMNS = { expense_date: 'expense_date', amount: 'amount', created_at: 'created_at' };
+const FIELDS = ['category', 'amount', 'description', 'expense_date', 'payment_method'];
+
+const toExpense = ({ user_id: _user, ...e }) => e;
+
+/** A user's expenses with expense_date inside [from, to]. */
+export const expensesIn = (userId, from, to) =>
+  db.expenses.filter((e) => e.user_id === userId && dayInRange(e.expense_date, from, to));
+
+const SORT_KEYS = {
+  expense_date: (e) => `${e.expense_date} ${e.created_at}`,
+  amount: (e) => cents(e.amount),
+  created_at: (e) => e.created_at,
+};
 
 export async function listExpenses(userId, q) {
-  const sql = new SqlParams();
-  sql.where(`user_id = ${sql.add(userId)}`);
-  if (q.from) sql.where(`expense_date >= ${sql.add(q.from)}::date`);
-  if (q.to) sql.where(`expense_date <= ${sql.add(q.to)}::date`);
-  if (q.category) sql.where(`lower(category) = lower(${sql.add(q.category)})`);
-  if (q.payment_method) sql.where(`payment_method = ${sql.add(q.payment_method)}`);
-  if (q.search) {
-    const p = sql.add(likePattern(q.search));
-    sql.where(`(category ILIKE ${p} OR description ILIKE ${p})`);
-  }
-
-  const where = sql.whereSql();
-  const { rows: countRows } = await query(
-    `SELECT COUNT(*) AS total, COALESCE(SUM(amount), 0)::numeric(20,2) AS total_amount
-       FROM expenses ${where}`,
-    sql.values,
+  const rows = expensesIn(userId, q.from, q.to).filter(
+    (e) =>
+      (!q.category || sameText(e.category, q.category)) &&
+      (!q.payment_method || e.payment_method === q.payment_method) &&
+      matches(q.search, e.category, e.description),
   );
-
-  const dir = q.order === 'asc' ? 'ASC' : 'DESC';
-  const l = sql.add(q.limit);
-  const o = sql.add(offset(q.page, q.limit));
-  const { rows } = await query(
-    `SELECT ${COLUMNS} FROM expenses ${where}
-      ORDER BY ${SORT_COLUMNS[q.sort]} ${dir}, created_at ${dir}, id
-      LIMIT ${l} OFFSET ${o}`,
-    sql.values,
-  );
-
+  const { items, meta } = paginate(sortRows(rows, SORT_KEYS[q.sort], q.order), q.page, q.limit);
   return {
-    items: rows,
-    meta: {
-      ...paginationMeta(q.page, q.limit, countRows[0].total),
-      total_amount: countRows[0].total_amount,
-    },
+    items: items.map(toExpense),
+    meta: { ...meta, total_amount: sumMoney(rows, (e) => e.amount) },
   };
 }
 
+function expenseOr404(userId, expenseId) {
+  const e = db.expenses.find((x) => x.id === expenseId && x.user_id === userId);
+  if (!e) throw AppError.notFound('Expense not found');
+  return e;
+}
+
 export async function getExpense(userId, expenseId) {
-  const { rows } = await query(`SELECT ${COLUMNS} FROM expenses WHERE id = $1 AND user_id = $2`, [
-    expenseId,
-    userId,
-  ]);
-  if (!rows.length) throw AppError.notFound('Expense not found');
-  return rows[0];
+  return toExpense(expenseOr404(userId, expenseId));
 }
 
 export async function listCategories(userId) {
-  const { rows } = await query(
-    `SELECT category, COUNT(*) AS expense_count, SUM(amount)::numeric(20,2) AS total_amount
-       FROM expenses WHERE user_id = $1
-      GROUP BY category ORDER BY category`,
-    [userId],
-  );
-  return rows;
+  const groups = groupBy(expensesIn(userId), (e) => e.category);
+  return [...groups]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([category, list]) => ({
+      category,
+      expense_count: list.length,
+      total_amount: sumMoney(list, (e) => e.amount),
+    }));
 }
 
 export async function createExpense(userId, data) {
-  const { rows } = await query(
-    `INSERT INTO expenses (user_id, category, amount, description, expense_date, payment_method)
-     VALUES ($1, $2, $3, $4, $5, COALESCE($6::payment_method, 'cash'))
-     RETURNING ${COLUMNS}`,
-    [
-      userId,
-      data.category,
-      data.amount,
-      data.description ?? null,
-      data.expense_date ?? today(),
-      data.payment_method ?? null,
-    ],
-  );
-  return rows[0];
+  const time = now();
+  const e = insert('expenses', {
+    user_id: userId,
+    category: data.category,
+    amount: data.amount,
+    description: data.description ?? null,
+    expense_date: data.expense_date ?? today(),
+    payment_method: data.payment_method ?? 'cash',
+    created_at: time,
+    updated_at: time,
+  });
+  return toExpense(e);
 }
 
 export async function updateExpense(userId, expenseId, data) {
-  const params = [expenseId, userId];
-  const sets = [];
-  for (const column of UPDATABLE) {
-    if (data[column] !== undefined) {
-      params.push(data[column]);
-      sets.push(`${column} = $${params.length}`);
-    }
-  }
-  const { rows } = await query(
-    `UPDATE expenses SET ${sets.join(', ')} WHERE id = $1 AND user_id = $2 RETURNING ${COLUMNS}`,
-    params,
-  );
-  if (!rows.length) throw AppError.notFound('Expense not found');
-  return rows[0];
+  const e = expenseOr404(userId, expenseId);
+  const changes = Object.fromEntries(FIELDS.filter((f) => data[f] !== undefined).map((f) => [f, data[f]]));
+  return toExpense(update('expenses', e, changes));
 }
 
 export async function deleteExpense(userId, expenseId) {
-  const { rowCount } = await query('DELETE FROM expenses WHERE id = $1 AND user_id = $2', [
-    expenseId,
-    userId,
-  ]);
-  if (!rowCount) throw AppError.notFound('Expense not found');
+  expenseOr404(userId, expenseId);
+  remove('expenses', (e) => e.id === expenseId);
   return { id: expenseId, deleted: true };
 }

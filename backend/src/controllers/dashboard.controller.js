@@ -21,7 +21,7 @@ export async function topProducts(req, res) {
   sendSuccess(res, await dashboard.getTopProducts(req.user.id, req.valid.query));
 }
 
-export async function dailySales(req, res) {
-  const { items, meta } = await dashboard.getDailySales(req.user.id, req.valid.query);
-  sendSuccess(res, items, { meta });
+export async function categories(req, res) {
+  sendSuccess(res, await dashboard.getCategories(req.user.id, req.valid.query));
 }
+

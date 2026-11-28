@@ -1,5 +1,6 @@
 import * as saleService from '../services/sale.service.js';
 import { AppError } from '../utils/AppError.js';
+import { checkReferralActivation } from '../services/bonus.service.js';
 import { sendSuccess } from '../utils/response.js';
 import { idempotencyKey } from '../validators/sale.validators.js';
 
@@ -11,8 +12,9 @@ export async function create(req, res) {
     ]);
   }
 
-  const { sale, replayed } = await saleService.createSale(req.user.id, req.valid.body, keyResult.data);
+  const { sale, replayed } = await saleService.createSale(req.user.id, req.valid.body, keyResult.data, req.actor);
   if (replayed) res.set('Idempotent-Replayed', 'true');
+  else checkReferralActivation(req.user.id);
   sendSuccess(res, sale, { status: replayed ? 200 : 201 });
 }
 
@@ -27,4 +29,8 @@ export async function getOne(req, res) {
 
 export async function statistics(req, res) {
   sendSuccess(res, await saleService.getStatistics(req.user.id, req.valid.query));
+}
+
+export async function returnSale(req, res) {
+  sendSuccess(res, await saleService.returnSale(req.user.id, req.valid.params.id, req.valid.body, req.actor));
 }

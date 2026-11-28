@@ -1,16 +1,20 @@
 /**
- * Dashboard analytics. Every number is aggregated from real rows in PostgreSQL with exact
- * NUMERIC arithmetic. Only 'completed' sales count.
+ * Dashboard analytics, computed from the user's real rows. Only 'completed' sales count.
  *
- *   revenue      = SUM(sale total_amount)
- *   cogs         = SUM(quantity * unit_cost snapshot at time of sale)
+ *   revenue      = sum of sale total_amount
+ *   cogs         = sum of quantity * unit_cost (cost at the time of sale)
  *   gross_profit = revenue - cogs
  *   net_profit   = gross_profit - expenses (by expense_date)
+ *
+ * All money math is done in whole tiyin (see utils/money.js).
  */
-import { query } from '../config/db.js';
-import { env } from '../config/env.js';
+import { db } from '../db/store.js';
 import { AppError } from '../utils/AppError.js';
-import { daysBetween, resolveRange, today } from '../utils/dates.js';
+import { bucketList, bucketStart, daysBetween, localDay, resolveRange, today } from '../utils/dates.js';
+import { cents, fromCents, percent } from '../utils/money.js';
+import { expensesIn } from './expense.service.js';
+import { completedSales, lineCents, lineCostCents } from './sale.service.js';
+import { q3 } from './inventoryLedger.js';
 
 const MAX_DAYS = { day: 400, week: 3 * 366, month: 10 * 366 };
 
@@ -25,64 +29,56 @@ export function checkedRange(q, { defaultDays = 30, maxDays = 10 * 366 } = {}) {
   return range;
 }
 
-// $1 user_id, $2 from, $3 to, $4 timezone
-const SALES_IN_RANGE = `
-  s.user_id = $1 AND s.status = 'completed'
-  AND s.sold_at >= ($2::date)::timestamp AT TIME ZONE $4
-  AND s.sold_at <  ($3::date + 1)::timestamp AT TIME ZONE $4`;
+/** Totals (in tiyin) of a list of sales and expenses. */
+function sumUp(sales, expenses) {
+  const revenue = sales.reduce((s, x) => s + cents(x.total_amount), 0);
+  const cogs = sales.reduce((s, x) => s + cents(x.total_cost), 0);
+  const spent = expenses.reduce((s, x) => s + cents(x.amount), 0);
+  return {
+    sales_count: sales.length,
+    units_sold: q3(sales.reduce((s, x) => s + x.items_count, 0)),
+    revenue,
+    cogs,
+    expenses_count: expenses.length,
+    expenses: spent,
+  };
+}
 
-const EXPENSES_IN_RANGE = 'e.user_id = $1 AND e.expense_date BETWEEN $2::date AND $3::date';
-
-const pct = (part, whole) =>
-  `CASE WHEN ${whole} > 0 THEN ROUND(${part} * 100.0 / ${whole}, 2) END`;
-
-/** Revenue/COGS/expenses/profit totals for a period. */
-async function periodTotals(userId, from, to) {
-  const { rows } = await query(
-    `WITH s AS (
-       SELECT COUNT(*) AS sales_count,
-              COALESCE(SUM(s.items_count), 0) AS units_sold,
-              COALESCE(SUM(s.total_amount), 0) AS revenue,
-              COALESCE(SUM(s.total_cost), 0) AS cogs
-         FROM sales s WHERE ${SALES_IN_RANGE}
-     ), e AS (
-       SELECT COUNT(*) AS expenses_count, COALESCE(SUM(e.amount), 0) AS expenses
-         FROM expenses e WHERE ${EXPENSES_IN_RANGE}
-     )
-     SELECT s.sales_count, s.units_sold,
-            s.revenue::numeric(20,2) AS revenue,
-            s.cogs::numeric(20,2) AS cogs,
-            (s.revenue - s.cogs)::numeric(20,2) AS gross_profit,
-            e.expenses_count,
-            e.expenses::numeric(20,2) AS expenses,
-            (s.revenue - s.cogs - e.expenses)::numeric(20,2) AS net_profit,
-            CASE WHEN s.sales_count > 0 THEN ROUND(s.revenue / s.sales_count, 2) ELSE 0 END::numeric(20,2)
-              AS average_sale_value,
-            ${pct('(s.revenue - s.cogs)', 's.revenue')} AS gross_margin_percent,
-            ${pct('(s.revenue - s.cogs - e.expenses)', 's.revenue')} AS net_margin_percent
-       FROM s, e`,
-    [userId, from, to, env.APP_TIMEZONE],
-  );
-  return rows[0];
+/** Revenue / COGS / expenses / profit for a period, as API strings. */
+function periodTotals(userId, from, to) {
+  const t = sumUp(completedSales(userId, from, to), expensesIn(userId, from, to));
+  const gross = t.revenue - t.cogs;
+  const net = gross - t.expenses;
+  return {
+    sales_count: t.sales_count,
+    units_sold: t.units_sold,
+    revenue: fromCents(t.revenue),
+    cogs: fromCents(t.cogs),
+    gross_profit: fromCents(gross),
+    expenses_count: t.expenses_count,
+    expenses: fromCents(t.expenses),
+    net_profit: fromCents(net),
+    average_sale_value: fromCents(t.sales_count ? Math.round(t.revenue / t.sales_count) : 0),
+    gross_margin_percent: percent(gross, t.revenue),
+    net_margin_percent: percent(net, t.revenue),
+  };
 }
 
 export async function getOverview(userId, q) {
   const { from, to } = checkedRange(q);
-  const totals = await periodTotals(userId, from, to);
-  const todayTotals = await periodTotals(userId, today(), today());
+  const totals = periodTotals(userId, from, to);
+  const day = today();
+  const todayTotals = periodTotals(userId, day, day);
 
-  const { rows } = await query(
-    `SELECT COUNT(*) AS active_products,
-            COALESCE(SUM(i.quantity), 0) AS total_units,
-            COALESCE(SUM(i.quantity * p.cost_price), 0)::numeric(20,2) AS stock_value_cost,
-            COALESCE(SUM(i.quantity * p.selling_price), 0)::numeric(20,2) AS stock_value_retail,
-            COUNT(*) FILTER (WHERE i.quantity > 0 AND i.quantity <= i.low_stock_threshold) AS low_stock_count,
-            COUNT(*) FILTER (WHERE i.quantity = 0) AS out_of_stock_count
-       FROM products p
-       JOIN inventory i ON i.product_id = p.id
-      WHERE p.user_id = $1 AND p.is_active`,
-    [userId],
-  );
+  const products = db.products.filter((p) => p.user_id === userId && p.is_active);
+  const inventory = {
+    active_products: products.length,
+    total_units: q3(products.reduce((s, p) => s + p.quantity, 0)),
+    stock_value_cost: fromCents(products.reduce((s, p) => s + Math.round(p.quantity * cents(p.cost_price)), 0)),
+    stock_value_retail: fromCents(products.reduce((s, p) => s + Math.round(p.quantity * cents(p.selling_price)), 0)),
+    low_stock_count: products.filter((p) => p.quantity > 0 && p.quantity <= p.low_stock_threshold).length,
+    out_of_stock_count: products.filter((p) => p.quantity === 0).length,
+  };
 
   return {
     period: { from, to },
@@ -101,9 +97,9 @@ export async function getOverview(userId, q) {
       gross_margin_percent: totals.gross_margin_percent,
       net_margin_percent: totals.net_margin_percent,
     },
-    inventory: rows[0],
+    inventory,
     today: {
-      date: today(),
+      date: day,
       sales_count: todayTotals.sales_count,
       revenue: todayTotals.revenue,
       net_profit: todayTotals.net_profit,
@@ -112,76 +108,54 @@ export async function getOverview(userId, q) {
 }
 
 /** Time series with every bucket present (zero-filled), oldest first. */
-async function series(userId, from, to, interval) {
-  const { rows } = await query(
-    `WITH buckets AS (
-       SELECT generate_series(
-                date_trunc($5::text, ($2::date)::timestamp),
-                date_trunc($5::text, ($3::date)::timestamp),
-                ('1 ' || $5::text)::interval
-              )::date AS bucket
-     ), s AS (
-       SELECT date_trunc($5::text, s.sold_at AT TIME ZONE $4)::date AS bucket,
-              COUNT(*) AS sales_count,
-              SUM(s.items_count) AS units_sold,
-              SUM(s.total_amount) AS revenue,
-              SUM(s.total_cost) AS cogs
-         FROM sales s WHERE ${SALES_IN_RANGE}
-        GROUP BY 1
-     ), e AS (
-       SELECT date_trunc($5::text, e.expense_date::timestamp)::date AS bucket,
-              SUM(e.amount) AS expenses
-         FROM expenses e WHERE ${EXPENSES_IN_RANGE}
-        GROUP BY 1
-     )
-     SELECT b.bucket::text AS period_start,
-            COALESCE(s.sales_count, 0) AS sales_count,
-            COALESCE(s.units_sold, 0) AS units_sold,
-            COALESCE(s.revenue, 0)::numeric(20,2) AS revenue,
-            COALESCE(s.cogs, 0)::numeric(20,2) AS cogs,
-            (COALESCE(s.revenue, 0) - COALESCE(s.cogs, 0))::numeric(20,2) AS gross_profit,
-            COALESCE(e.expenses, 0)::numeric(20,2) AS expenses,
-            (COALESCE(s.revenue, 0) - COALESCE(s.cogs, 0) - COALESCE(e.expenses, 0))::numeric(20,2)
-              AS net_profit
-       FROM buckets b
-       LEFT JOIN s ON s.bucket = b.bucket
-       LEFT JOIN e ON e.bucket = b.bucket
-      ORDER BY b.bucket`,
-    [userId, from, to, env.APP_TIMEZONE, interval],
-  );
-  return rows;
+function series(userId, from, to, interval) {
+  const sales = new Map();
+  for (const s of completedSales(userId, from, to)) {
+    const key = bucketStart(localDay(s.sold_at), interval);
+    if (!sales.has(key)) sales.set(key, []);
+    sales.get(key).push(s);
+  }
+  const expenses = new Map();
+  for (const e of expensesIn(userId, from, to)) {
+    const key = bucketStart(e.expense_date, interval);
+    if (!expenses.has(key)) expenses.set(key, []);
+    expenses.get(key).push(e);
+  }
+
+  return bucketList(from, to, interval).map((period_start) => {
+    const t = sumUp(sales.get(period_start) ?? [], expenses.get(period_start) ?? []);
+    return {
+      period_start,
+      sales_count: t.sales_count,
+      units_sold: t.units_sold,
+      revenue: fromCents(t.revenue),
+      cogs: fromCents(t.cogs),
+      gross_profit: fromCents(t.revenue - t.cogs),
+      expenses: fromCents(t.expenses),
+      net_profit: fromCents(t.revenue - t.cogs - t.expenses),
+    };
+  });
 }
 
-const pick = (rows, keys) => rows.map((r) => Object.fromEntries(['period_start', ...keys].map((k) => [k, r[k]])));
+const pick = (row, keys) => Object.fromEntries(keys.map((k) => [k, row[k]]));
 
-async function seriesReport(userId, q, keys, totalKeys) {
+function seriesReport(userId, q, keys, totalKeys) {
   const { from, to } = checkedRange(q, { maxDays: MAX_DAYS[q.interval] });
-  const [rows, totals] = await Promise.all([series(userId, from, to, q.interval), periodTotals(userId, from, to)]);
   return {
     period: { from, to },
     interval: q.interval,
-    totals: Object.fromEntries(totalKeys.map((k) => [k, totals[k]])),
-    series: pick(rows, keys),
+    totals: pick(periodTotals(userId, from, to), totalKeys),
+    series: series(userId, from, to, q.interval).map((r) => pick(r, ['period_start', ...keys])),
   };
 }
 
-export const getSalesSeries = (userId, q) =>
-  seriesReport(
-    userId,
-    q,
-    ['sales_count', 'units_sold', 'revenue'],
-    ['sales_count', 'units_sold', 'revenue', 'average_sale_value'],
-  );
+export const getSalesSeries = async (userId, q) =>
+  seriesReport(userId, q, ['sales_count', 'units_sold', 'revenue'], ['sales_count', 'units_sold', 'revenue', 'average_sale_value']);
 
-export const getRevenueSeries = (userId, q) =>
-  seriesReport(
-    userId,
-    q,
-    ['revenue', 'cogs', 'gross_profit'],
-    ['revenue', 'cogs', 'gross_profit', 'gross_margin_percent'],
-  );
+export const getRevenueSeries = async (userId, q) =>
+  seriesReport(userId, q, ['revenue', 'cogs', 'gross_profit'], ['revenue', 'cogs', 'gross_profit', 'gross_margin_percent']);
 
-export const getProfitSeries = (userId, q) =>
+export const getProfitSeries = async (userId, q) =>
   seriesReport(
     userId,
     q,
@@ -189,82 +163,72 @@ export const getProfitSeries = (userId, q) =>
     ['revenue', 'cogs', 'gross_profit', 'expenses', 'net_profit', 'net_margin_percent'],
   );
 
+/** Per-product sold quantity / revenue / cost (in tiyin) over completed sales in a range. */
+function productSales(userId, from, to) {
+  const byProduct = new Map();
+  for (const sale of completedSales(userId, from, to)) {
+    for (const it of sale.items) {
+      const row = byProduct.get(it.product_id) ?? { quantity: 0, revenue: 0, cogs: 0, sales: new Set() };
+      row.quantity = q3(row.quantity + it.quantity);
+      row.revenue += lineCents(it);
+      row.cogs += lineCostCents(it);
+      row.sales.add(sale.id);
+      byProduct.set(it.product_id, row);
+    }
+  }
+  return [...byProduct].map(([productId, row]) => ({
+    product: db.products.find((p) => p.id === productId),
+    ...row,
+  }));
+}
+
 const TOP_ORDER = {
-  revenue: 'revenue DESC',
-  quantity: 'quantity_sold DESC',
-  profit: 'gross_profit DESC',
+  revenue: (r) => r.revenue,
+  quantity: (r) => r.quantity,
+  profit: (r) => r.revenue - r.cogs,
 };
 
 export async function getTopProducts(userId, q) {
   const { from, to } = checkedRange(q);
-  const { rows } = await query(
-    `SELECT p.id AS product_id, p.sku, p.name, p.category, p.is_active,
-            SUM(si.quantity) AS quantity_sold,
-            COUNT(DISTINCT s.id) AS sales_count,
-            SUM(si.line_total)::numeric(20,2) AS revenue,
-            SUM(si.line_cost)::numeric(20,2) AS cogs,
-            (SUM(si.line_total) - SUM(si.line_cost))::numeric(20,2) AS gross_profit
-       FROM sale_items si
-       JOIN sales s ON s.id = si.sale_id
-       JOIN products p ON p.id = si.product_id
-      WHERE ${SALES_IN_RANGE}
-      GROUP BY p.id
-      ORDER BY ${TOP_ORDER[q.by]}, p.name, p.id
-      LIMIT $5`,
-    [userId, from, to, env.APP_TIMEZONE, q.limit],
-  );
-  return { period: { from, to }, by: q.by, items: rows };
+  const key = TOP_ORDER[q.by];
+  const dir = q.order === 'asc' ? 1 : -1;
+  const items = productSales(userId, from, to)
+    .sort((a, b) => dir * (key(a) - key(b)) || a.product.name.localeCompare(b.product.name))
+    .slice(0, q.limit)
+    .map((r) => ({
+      product_id: r.product.id,
+      sku: r.product.sku,
+      name: r.product.name,
+      category: r.product.category,
+      is_active: r.product.is_active,
+      quantity_sold: r.quantity,
+      sales_count: r.sales.size,
+      revenue: fromCents(r.revenue),
+      cogs: fromCents(r.cogs),
+      gross_profit: fromCents(r.revenue - r.cogs),
+    }));
+  return { period: { from, to }, by: q.by, order: q.order, items };
 }
 
-/**
- * Daily per-product sales history for the AI forecasting service.
- * One row per (date, product) with any completed sales. Days without sales are omitted.
- */
-export async function getDailySales(userId, q) {
-  const { from, to } = checkedRange(q, { defaultDays: 90, maxDays: 3 * 366 });
-  const params = [userId, from, to, env.APP_TIMEZONE];
-  let productFilter = '';
-  if (q.product_id) {
-    params.push(q.product_id);
-    productFilter = `AND si.product_id = $${params.length}`;
+/** Revenue and units per product category (products without a category are grouped as null). */
+export async function getCategories(userId, q) {
+  const { from, to } = checkedRange(q);
+  const byCategory = new Map();
+  for (const r of productSales(userId, from, to)) {
+    const category = r.product.category ?? null;
+    const row = byCategory.get(category) ?? { category, quantity: 0, revenue: 0, cogs: 0 };
+    row.quantity = q3(row.quantity + r.quantity);
+    row.revenue += r.revenue;
+    row.cogs += r.cogs;
+    byCategory.set(category, row);
   }
-
-  const base = `
-    FROM sale_items si
-    JOIN sales s ON s.id = si.sale_id
-    JOIN products p ON p.id = si.product_id
-   WHERE ${SALES_IN_RANGE} ${productFilter}
-   GROUP BY 1, si.product_id, p.sku, p.name, p.category`;
-
-  const { rows: countRows } = await query(
-    `SELECT COUNT(*) AS total FROM (SELECT (s.sold_at AT TIME ZONE $4)::date ${base}) t`,
-    params,
-  );
-
-  params.push(q.limit, (q.page - 1) * q.limit);
-  const { rows } = await query(
-    `SELECT (s.sold_at AT TIME ZONE $4)::date::text AS date,
-            si.product_id, p.sku, p.name, p.category,
-            SUM(si.quantity) AS quantity,
-            SUM(si.line_total)::numeric(20,2) AS revenue,
-            SUM(si.line_cost)::numeric(20,2) AS cogs,
-            ROUND(SUM(si.line_total) / SUM(si.quantity), 2)::numeric(20,2) AS avg_unit_price
-     ${base}
-     ORDER BY 1, p.sku
-     LIMIT $${params.length - 1} OFFSET $${params.length}`,
-    params,
-  );
-
-  const total = countRows[0].total;
-  return {
-    items: rows,
-    meta: {
-      period: { from, to },
-      timezone: env.APP_TIMEZONE,
-      page: q.page,
-      limit: q.limit,
-      total,
-      total_pages: Math.ceil(total / q.limit),
-    },
-  };
+  const items = [...byCategory.values()]
+    .sort((a, b) => b.revenue - a.revenue || String(a.category ?? '￿').localeCompare(String(b.category ?? '￿')))
+    .map((r) => ({
+      category: r.category,
+      quantity_sold: r.quantity,
+      revenue: fromCents(r.revenue),
+      gross_profit: fromCents(r.revenue - r.cogs),
+    }));
+  return { period: { from, to }, items };
 }

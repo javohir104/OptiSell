@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { dateRangeFields, id, refineDateRange } from './common.js';
+import { dateRangeFields, refineDateRange } from './common.js';
 
 export const rangeQuery = refineDateRange(z.object({ ...dateRangeFields }));
 
@@ -15,14 +15,7 @@ export const topProductsQuery = refineDateRange(
     ...dateRangeFields,
     limit: z.coerce.number().int().min(1).max(50).default(10),
     by: z.enum(['revenue', 'quantity', 'profit']).default('revenue'),
+    order: z.enum(['asc', 'desc']).default('desc'),
   }),
 );
 
-export const dailySalesQuery = refineDateRange(
-  z.object({
-    ...dateRangeFields,
-    product_id: id.optional(),
-    page: z.coerce.number().int().min(1).max(100_000).default(1),
-    limit: z.coerce.number().int().min(1).max(5000).default(1000),
-  }),
-);

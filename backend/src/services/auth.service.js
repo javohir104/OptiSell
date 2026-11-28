@@ -1,55 +1,87 @@
 import bcrypt from 'bcryptjs';
-import { query } from '../config/db.js';
 import { env } from '../config/env.js';
+import { TRIAL_MONTHS, TRIAL_PLAN, hasFeature } from '../config/plans.js';
+import { insert, now } from '../db/store.js';
 import { AppError } from '../utils/AppError.js';
+import { addMonths } from '../utils/dates.js';
 import { signAccessToken, tokenExpiresIn } from '../utils/jwt.js';
-
-const USER_COLUMNS = 'id, email, full_name, business_name, created_at';
+import { findUserByEmail, isStaff, ownerOf, toPublicUser } from './user.shared.js';
+import { referrerFor } from './bonus.service.js';
 
 // Compared against when the email does not exist, so a login for an unknown email
 // takes the same time as a wrong password (prevents user enumeration by timing).
 const DUMMY_HASH = bcrypt.hashSync('optisell-timing-equalizer', env.BCRYPT_ROUNDS);
 
-function authResult(user) {
+export function authResult(row) {
+  const user = toPublicUser(row);
   const token = signAccessToken(user.id);
-  return {
-    user,
-    token,
-    token_type: 'Bearer',
-    expires_in: tokenExpiresIn(token),
-  };
+  return { user, token, token_type: 'Bearer', expires_in: tokenExpiresIn(token) };
 }
 
-export async function register({ email, password, full_name, business_name }) {
-  const passwordHash = await bcrypt.hash(password, env.BCRYPT_ROUNDS);
-  try {
-    const { rows } = await query(
-      `INSERT INTO users (email, password_hash, full_name, business_name)
-       VALUES ($1, $2, $3, $4)
-       RETURNING ${USER_COLUMNS}`,
-      [email, passwordHash, full_name, business_name ?? null],
-    );
-    return authResult(rows[0]);
-  } catch (err) {
-    if (err.code === '23505' && err.constraint === 'users_email_uq') {
-      throw AppError.conflict('An account with this email already exists', undefined, 'EMAIL_TAKEN');
-    }
-    throw err;
+/** Create a user row. Throws EMAIL_TAKEN when the email is already registered. */
+export function createUser(fields) {
+  if (findUserByEmail(fields.email)) {
+    throw AppError.conflict('An account with this email already exists', undefined, 'EMAIL_TAKEN');
   }
+  const time = now();
+  return insert('users', {
+    first_name: null,
+    last_name: null,
+    phone: null,
+    avatar_url: null,
+    business_name: null,
+    plan: 'free',
+    plan_expires_at: null,
+    trial_used: false,
+    google_id: null,
+    role: 'user',
+    is_test_account: false,
+    last_active_at: null,
+    created_at: time,
+    updated_at: time,
+    ...fields,
+  });
+}
+
+export async function register({ email, password, full_name, first_name, last_name, business_name, referral_code }) {
+  const password_hash = await bcrypt.hash(password, env.BCRYPT_ROUNDS);
+  // Every new account starts with a free month of Pro.
+  const user = createUser({
+    email,
+    password_hash,
+    full_name,
+    first_name: first_name ?? full_name,
+    last_name: last_name ?? null,
+    business_name: business_name ?? null,
+    plan: TRIAL_PLAN,
+    plan_expires_at: addMonths(now(), TRIAL_MONTHS),
+    trial_used: true,
+    referred_by: referrerFor(referral_code)?.id ?? null,
+  });
+  return authResult(user);
 }
 
 export async function login({ email, password }) {
-  const { rows } = await query(
-    `SELECT ${USER_COLUMNS}, password_hash FROM users WHERE email = $1`,
-    [email],
-  );
-  const row = rows[0];
-
+  const row = findUserByEmail(email);
   const valid = await bcrypt.compare(password, row?.password_hash ?? DUMMY_HASH);
   if (!row || !valid) {
     throw new AppError(401, 'INVALID_CREDENTIALS', 'Invalid email or password');
   }
+  assertCanSignIn(row);
+  return authResult(row);
+}
 
-  const { password_hash: _omit, ...user } = row;
-  return authResult(user);
+/**
+ * Sellers can sign in only while their account is on and the shop's plan includes sellers.
+ * (Checked again on every request by requireAuth.)
+ */
+export function assertCanSignIn(row) {
+  if (row.is_active === false) throw new AppError(403, 'ACCOUNT_DISABLED', 'This account has been disabled by the shop owner');
+  if (isStaff(row)) {
+    const owner = ownerOf(row);
+    if (!owner) throw new AppError(403, 'ACCOUNT_DISABLED', 'This account has been disabled');
+    if (!hasFeature(owner, 'staff')) {
+      throw new AppError(403, 'STAFF_PLAN_EXPIRED', "The shop's plan no longer includes seller accounts. Ask the owner to renew Max.");
+    }
+  }
 }

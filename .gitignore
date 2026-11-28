@@ -3,11 +3,5 @@
 !.env.example
 node_modules/
 dist/
-.venv/
-venv/
-__pycache__/
-.pytest_cache/
-*.pyc
-*.pyo
-*.tsbuildinfo
-.coverage
+backend/data/
+*.log

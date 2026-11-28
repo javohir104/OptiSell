@@ -215,3 +215,18 @@ describe('bulk import (POST /api/products/bulk)', () => {
     assert.equal(list.body.data.length, 0);
   });
 });
+
+describe('generated barcodes', () => {
+  it('gives products without a barcode a valid unique in-store EAN-13', async () => {
+    const { token } = await registerUser();
+    await createProduct(token);
+    await createProduct(token);
+    await createProduct(token, { barcode: '4780000000017' });
+    const res = await api('POST', '/api/products/generate-barcodes', { token, body: {} });
+    assert.equal(res.body.data.generated, 2);
+    const codes = res.body.data.items.map((p) => p.barcode);
+    assert.deepEqual(codes, ['2000000000015', '2000000000022']);
+    const again = await api('POST', '/api/products/generate-barcodes', { token, body: {} });
+    assert.equal(again.body.data.generated, 0);
+  });
+});

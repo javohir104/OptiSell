@@ -3,12 +3,12 @@ import { randomUUID } from 'node:crypto';
 
 let server;
 let baseUrl;
-let pool;
+let store;
 
 /** Start the real Express app on a random port (import is lazy so tests can tweak env first). */
 export async function startServer() {
   const { createApp } = await import('../src/app.js');
-  ({ pool } = await import('../src/config/db.js'));
+  store = await import('../src/db/store.js');
   const app = createApp();
   await new Promise((resolve) => {
     server = app.listen(0, '127.0.0.1', resolve);
@@ -19,12 +19,11 @@ export async function startServer() {
 export async function stopServer() {
   server.closeAllConnections();
   await new Promise((resolve) => server.close(resolve));
-  await pool.end();
 }
 
-/** Direct DB access for assertions. */
+/** Direct access to the in-memory data (db().users, db().products, ...) for assertions. */
 export function db() {
-  return pool;
+  return store.db;
 }
 
 export async function api(method, path, { token, body, headers = {}, rawBody } = {}) {

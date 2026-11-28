@@ -139,3 +139,17 @@ describe('inventory listing, low stock and history', () => {
     assert.equal(badRange.status, 400);
   });
 });
+
+describe('stock-take', () => {
+  it('sets counted stock, reports shortages and surpluses at cost', async () => {
+    const { token } = await registerUser();
+    const a = await createProduct(token, { cost_price: '100', initial_quantity: 10 });
+    const b = await createProduct(token, { cost_price: '50', initial_quantity: 4 });
+    const res = await api('POST', '/api/inventory/count', { token, body: { items: [{ product_id: a.id, counted: 7 }, { product_id: b.id, counted: 6 }] } });
+    assert.equal(res.status, 200, JSON.stringify(res.body));
+    assert.equal(res.body.data.shortage_value, '-300.00');
+    assert.equal(res.body.data.surplus_value, '100.00');
+    assert.equal(await stockOf(token, a.id), 7);
+    assert.equal(await stockOf(token, b.id), 6);
+  });
+});

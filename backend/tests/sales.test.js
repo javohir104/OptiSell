@@ -135,11 +135,8 @@ describe('concurrency and idempotency', () => {
     assert.equal(statuses.filter((s) => s === 409).length, 5);
     assert.equal(await stockOf(token, p.id), 0);
 
-    const { rows } = await db().query(
-      "SELECT COUNT(*)::int AS n FROM inventory_movements WHERE product_id = $1 AND movement_type = 'sale'",
-      [p.id],
-    );
-    assert.equal(rows[0].n, 5);
+    const moves = db().inventory_movements.filter((m) => m.product_id === p.id && m.movement_type === 'sale');
+    assert.equal(moves.length, 5);
   });
 
   it('opposite item order in parallel sales does not deadlock', async () => {

@@ -12,12 +12,25 @@ import {
   text,
 } from './common.js';
 
+export const countBody = z
+  .strictObject({
+    items: z.array(z.strictObject({ product_id: id, counted: nonNegativeQuantity })).min(1).max(5000),
+    note: optionalText(200),
+  })
+  .refine((b) => new Set(b.items.map((x) => x.product_id)).size === b.items.length, { error: 'Each product may appear only once', path: ['items'] });
+
 export const adjustBody = z
   .strictObject({
     product_id: id,
     type: z.enum(['restock', 'adjustment', 'return']),
     // Relative change (+ adds stock, - removes stock)...
-    quantity_change: z.number().int().min(-MAX_QUANTITY).max(MAX_QUANTITY).optional(),
+    quantity_change: z
+      .number()
+      .min(-MAX_QUANTITY)
+      .max(MAX_QUANTITY)
+      .refine((v) => Math.abs(Math.round(v * 1000) - v * 1000) < 1e-6, 'At most 3 decimal places')
+      .transform((v) => Math.round(v * 1000) / 1000)
+      .optional(),
     // ...or, for type "adjustment" only, the absolute counted quantity (stock-take).
     new_quantity: nonNegativeQuantity.optional(),
     note: optionalText(500),
@@ -66,7 +79,7 @@ export const historyQuery = refineDateRange(
     ...pagination,
     ...dateRangeFields,
     product_id: id.optional(),
-    type: z.enum(['initial', 'restock', 'adjustment', 'sale', 'return', 'import']).optional(),
+    type: z.enum(['initial', 'restock', 'adjustment', 'sale', 'return', 'import', 'purchase']).optional(),
     order: sortOrder,
   }),
 );

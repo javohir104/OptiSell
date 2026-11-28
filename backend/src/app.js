@@ -27,7 +27,13 @@ export function createApp() {
       credentials: true,
     }),
   );
-  app.use(express.json({ limit: '1mb' }));
+  // CSV imports carry many rows; every other route keeps the small body limit.
+  const jsonDefault = express.json({ limit: '1mb' });
+  const jsonImport = express.json({ limit: '12mb' });
+  app.use((req, res, next) => {
+    const isImport = req.method === 'POST' && req.path.startsWith('/api/import/');
+    return (isImport ? jsonImport : jsonDefault)(req, res, next);
+  });
 
   if (env.NODE_ENV !== 'test') {
     app.use(morgan(env.NODE_ENV === 'production' ? 'combined' : 'dev'));

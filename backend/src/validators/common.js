@@ -3,7 +3,7 @@ import { z } from 'zod';
 export const MAX_MONEY = 9_999_999_999.99;
 export const MAX_QUANTITY = 1_000_000;
 
-/** UUID path/query/body id. Invalid ids get a 400 instead of a database error. */
+/** UUID path/query/body id. Invalid ids get a 400. */
 export const id = z.guid({ error: 'Must be a valid id (UUID)' });
 
 export const idParams = z.strictObject({ id });
@@ -23,8 +23,21 @@ export const money = z
 
 export const positiveMoney = money.refine((v) => Number(v) > 0, { error: 'Must be greater than 0' });
 
-export const quantity = z.number().int().min(1).max(MAX_QUANTITY);
-export const nonNegativeQuantity = z.number().int().min(0).max(MAX_QUANTITY);
+/** Quantities may be fractional for weighed goods (0.75 kg): at most 3 decimals, rounded to 0.001. */
+export const q3 = (v) => Math.round(v * 1000) / 1000;
+const threeDecimals = (v) => Math.abs(Math.round(v * 1000) - v * 1000) < 1e-6;
+export const quantity = z
+  .number()
+  .positive()
+  .max(MAX_QUANTITY)
+  .refine(threeDecimals, 'At most 3 decimal places')
+  .transform(q3);
+export const nonNegativeQuantity = z
+  .number()
+  .min(0)
+  .max(MAX_QUANTITY)
+  .refine(threeDecimals, 'At most 3 decimal places')
+  .transform(q3);
 
 /** Trimmed string; empty string becomes null when optional fields are cleared. */
 export const text = (max, min = 1) => z.string().trim().min(min).max(max);
@@ -65,10 +78,5 @@ export function refineDateRange(schema) {
   });
 }
 
-/** Search string for ILIKE. */
+/** Search text (matched case-insensitively). */
 export const search = z.string().trim().min(1).max(100).optional();
-
-/** Escape LIKE wildcards so user input is matched literally. */
-export function likePattern(term) {
-  return `%${term.replace(/[\\%_]/g, '\\$&')}%`;
-}

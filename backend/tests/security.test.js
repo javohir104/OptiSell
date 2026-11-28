@@ -19,9 +19,10 @@ describe('HTTP hardening', () => {
     assert.equal(res.headers.get('x-frame-options'), 'SAMEORIGIN');
   });
 
-  it('health reports the database as up', async () => {
+  it('health reports ok', async () => {
     const res = await api('GET', '/api/health');
-    assert.equal(res.body.data.database, 'up');
+    assert.equal(res.status, 200);
+    assert.equal(res.body.data.status, 'ok');
   });
 
   it('CORS allows configured origins only', async () => {
