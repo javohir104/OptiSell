@@ -207,7 +207,7 @@ fayllarni `backend/data/` ga nusxalang, qayta ishga tushiring. Admin panel → B
 `TELEGRAM_BOT_TOKEN`, `TELEGRAM_BOT_USERNAME`, `TELEGRAM_LINK_SECRET` ni yozing; `telegram-bot/.env` ga esa
 `BACKEND_URL` va o'sha `TELEGRAM_LINK_SECRET` ni yozing.
 
-**Support:** Telegram @Opti_Sellsupport · +998 (95) 812 50 12
+**Support:** Telegram @OptiSell_support · +998 (95) 812 50 12
 
 ### Bonus ballar
 | Nima uchun | Ball |

@@ -51,12 +51,29 @@ export function GisButton({ text = 'signin_with', handoff, onSuccess, onError })
   const { isDark } = useTheme();
   const ref = useRef(null);
   const [busy, setBusy] = useState(false);
+  const [ready, setReady] = useState(false);
+  const [width, setWidth] = useState(0);
   // Latest callbacks without re-initialising Google on every render.
   const cb = useRef({ onSuccess, onError });
   cb.current = { onSuccess, onError };
 
+  // Google draws a fixed-width button (200..400px): follow the container so it never overflows on
+  // phones and is redrawn after rotating / resizing.
   useEffect(() => {
-    if (!CLIENT_ID) return undefined;
+    const el = ref.current;
+    if (!el) return undefined;
+    const measure = () => {
+      const w = Math.round(el.getBoundingClientRect().width);
+      if (w > 0) setWidth((prev) => (Math.abs(prev - w) > 4 ? w : prev));
+    };
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  useEffect(() => {
+    if (!CLIENT_ID || !width) return undefined;
     let alive = true;
     loadGoogleScript()
       .then(() => {
@@ -81,25 +98,31 @@ export function GisButton({ text = 'signin_with', handoff, onSuccess, onError })
             }
           },
         });
-        ref.current.innerHTML = '';
-        window.google.accounts.id.renderButton(ref.current, {
+        const host = ref.current.querySelector('[data-gsi-host]');
+        host.innerHTML = '';
+        window.google.accounts.id.renderButton(host, {
           type: 'standard',
           theme: isDark ? 'filled_black' : 'outline',
           size: 'large',
           shape: 'rectangular',
           text,
           locale: lang,
-          width: Math.min(ref.current.offsetWidth || 400, 400),
+          logo_alignment: 'center',
+          width: Math.max(200, Math.min(width, 400)),
         });
+        setReady(true);
       })
       .catch((err) => alive && cb.current.onError?.(err));
     return () => { alive = false; };
-  }, [isDark, lang, text, handoff, loginWithGoogle]);
+  }, [isDark, lang, text, handoff, loginWithGoogle, width]);
 
   if (!CLIENT_ID) return null;
   return (
-    <div className={busy ? 'pointer-events-none opacity-60' : undefined} aria-busy={busy}>
-      <div ref={ref} className="flex min-h-[44px] w-full justify-center" />
+    <div ref={ref} aria-busy={busy}
+      className={`relative min-h-10 w-full overflow-x-hidden ${busy ? 'pointer-events-none opacity-60' : ''}`}>
+      {/* Placeholder until Google's iframe is in, so the form does not jump. */}
+      {!ready && <div className="absolute inset-0 animate-pulse rounded-md border border-zinc-200 bg-zinc-50 dark:border-zinc-800 dark:bg-zinc-900" aria-hidden="true" />}
+      <div data-gsi-host="" className="flex min-h-10 w-full justify-center [color-scheme:normal]" />
     </div>
   );
 }

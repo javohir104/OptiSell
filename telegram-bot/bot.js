@@ -27,7 +27,7 @@ const BACKEND_URL = (process.env.BACKEND_URL || '').trim().replace(/\/+$/, '');
 const LINK_SECRET = (process.env.TELEGRAM_LINK_SECRET || '').trim();
 
 // Support contacts (shown in /help and /support).
-const SUPPORT_TG = 'Opti_Sellsupport';
+const SUPPORT_TG = 'OptiSell_support';
 const SUPPORT_PHONE = '+998 (95) 812 50 12';
 
 async function backend(path, body) {
